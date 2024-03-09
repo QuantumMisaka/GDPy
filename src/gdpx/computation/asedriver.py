@@ -4,8 +4,10 @@
 import os
 import copy
 import dataclasses
+import io
 import shutil
-from pathlib import Path
+import pathlib
+import tarfile
 import traceback
 from typing import NoReturn, List, Tuple
 import warnings
@@ -111,6 +113,12 @@ class AseDriverSetting(DriverSetting):
     driver_cls: Dynamics = None
     filter_cls: Filter = None
 
+    thermostat: str = None
+    friction: float = 0.01
+    friction_seed: int = None
+
+    fix_cm: bool = False
+
     fmax: float = 0.05 # eV/Ang
 
     def __post_init__(self):
@@ -118,9 +126,13 @@ class AseDriverSetting(DriverSetting):
         # - task-specific params
         if self.task == "md":
             self._internals.update(
+                # - helper params
                 velocity_seed = self.velocity_seed,
                 ignore_atoms_velocities = self.ignore_atoms_velocities,
-                md_style = self.md_style,
+                md_style = self.md_style, # ensemble...
+                thermostat = self.thermostat, 
+                # -
+                fixcm = self.fix_cm,
                 timestep = self.timestep,
                 temperature_K = self.temp,
                 taut = self.Tdamp,
@@ -131,8 +143,28 @@ class AseDriverSetting(DriverSetting):
             if self.md_style == "nve":
                 from ase.md.verlet import VelocityVerlet as driver_cls
             elif self.md_style == "nvt":
-                #from gdpx.md.nosehoover import NoseHoover as driver_cls
-                from ase.md.nvtberendsen import NVTBerendsen as driver_cls
+                thermostat = self.thermostat if self.thermostat is not None else "berendsen"
+                if thermostat == "berendsen":
+                    from ase.md.nvtberendsen import NVTBerendsen as driver_cls
+                    thermostat_params = dict(
+                        taut = self._internals["taut"]
+                    )
+                elif thermostat == "langevin":
+                    from ase.md.langevin import Langevin as driver_cls
+                    if self.friction_seed is not None:
+                        friction_seed = self.friction_seed 
+                    else:
+                        friction_seed = np.random.randint(0, 100000000)
+                    thermostat_params = dict(
+                        friction = self.friction/units.fs,
+                        rng = np.random.default_rng(seed=friction_seed)
+                    )
+                elif thermostat == "nose_hoover":   
+                    from gdpx.md.nosehoover import NoseHoover as driver_cls
+                else:
+                    raise RuntimeError(f"Unknown thermostat {thermostat}.")
+                self._internals["thermostat"] = thermostat
+                self._internals["thermostat_params"] = thermostat_params
             elif self.md_style == "npt":
                 from ase.md.nptberendsen import NPTBerendsen as driver_cls
         
@@ -276,7 +308,8 @@ class AseDriver(AbstractDriver):
         elif self.setting.task == "md":
             # - adjust params
             init_params_ = copy.deepcopy(self.setting.get_init_params())
-            velocity_seed = init_params_.pop("velocity_seed", np.random.randint(0,10000))
+            velocity_seed = init_params_.pop("velocity_seed", np.random.randint(0, 10000))
+            #self.setting._internals["velocity_seed"] = velocity_seed
             rng = np.random.default_rng(velocity_seed)
 
             # - velocity
@@ -303,12 +336,13 @@ class AseDriver(AbstractDriver):
             elif md_style == "nvt":
                 init_params_ = {
                     k:v for k,v in init_params_.items() 
-                    if k in ["loginterval", "timestep", "temperature_K", "taut"]
+                    if k in ["loginterval", "fixcm", "timestep", "temperature_K"]
                 }
+                init_params_.update(**self.setting._internals["thermostat_params"])
             elif md_style == "npt":
                 init_params_ = {
                     k:v for k,v in init_params_.items() 
-                    if k in ["loginterval", "timestep", "temperature_K", "taut", "pressure", "taup"]
+                    if k in ["loginterval", "fixcm", "timestep", "temperature_K", "taut", "pressure", "taup"]
                 }
                 init_params_["pressure"] *= (1./(160.21766208/0.000101325))
 
@@ -355,7 +389,18 @@ class AseDriver(AbstractDriver):
             # To restart, velocities are always retained 
             prev_ignore_atoms_velocities = self.setting.ignore_atoms_velocities
             if ckpt_wdir is None: # start from the scratch
-                ...
+                curr_params = {}
+                curr_params["init"] = self.setting.get_init_params()
+                if self.setting.task == "md": # check rng for MD simulations...
+                    if "rng" in curr_params["init"]["thermostat_params"]: # langevin...
+                        rng = curr_params["init"]["thermostat_params"]["rng"]
+                        curr_params["init"]["thermostat_params"]["rng"] = rng._bit_generator.state
+                else:
+                    ...
+                curr_params["run"] = self.setting.get_run_params()
+                import yaml
+                with open(self.directory/"params.yaml", "w") as fopen:
+                    yaml.safe_dump(curr_params, fopen, indent=4)
             else: # restart ...
                 traj = self.read_trajectory()
                 nframes = len(traj)
@@ -390,6 +435,10 @@ class AseDriver(AbstractDriver):
                 atoms=atoms, devi_fpath=self.directory/self.devi_fname
             )
             dynamics.run(**run_params)
+            # - Some interactive calculator needs kill processes after finishing,
+            #   e.g. VaspInteractive...
+            if hasattr(self.calc, "finalize"):
+                self.calc.finalize()
             # To restart, velocities are always retained 
             self.setting.ignore_atoms_velocities = prev_ignore_atoms_velocities
         except Exception as e:
@@ -418,13 +467,30 @@ class AseDriver(AbstractDriver):
 
         return scf_convergence
     
-    def _read_a_single_trajectory(self, wdir, *args, **kwargs):
+    def _read_a_single_trajectory(
+            self, wdir: pathlib.Path, archive_path: pathlib.Path=None, 
+            *args, **kwargs
+        ):
         """"""
-        frames = read(wdir/self.xyz_fname, ":")
+        self._debug(f"archive_path: {archive_path}")
+        self._debug(f"wdir: {wdir}")
+        if archive_path is None:
+            frames = read(wdir/self.xyz_fname, ":") # TODO: check traj existence?
+        else:
+            target_name = str((wdir/self.xyz_fname).relative_to(self.directory.parent))
+            with tarfile.open(archive_path, "r:gz") as tar:
+                for tarinfo in tar:
+                    if tarinfo.name == target_name:
+                        fobj = io.StringIO(tar.extractfile(tarinfo.name).read().decode())
+                        frames = read(fobj, ":", format="extxyz")
+                        fobj.close()
+                        break
+                else: # TODO: if not find target traj?
+                    ...
 
         return frames
     
-    def read_trajectory(self, *args, **kwargs) -> List[Atoms]:
+    def read_trajectory(self, archive_path=None, *args, **kwargs) -> List[Atoms]:
         """Read trajectory in the current working directory."""
         # -
         prev_wdirs = sorted(self.directory.glob(r"[0-9][0-9][0-9][0-9][.]run"))
@@ -432,15 +498,12 @@ class AseDriver(AbstractDriver):
         
         traj_list = []
         for w in prev_wdirs:
-            curr_frames = self._read_a_single_trajectory(w)
+            curr_frames = self._read_a_single_trajectory(w, archive_path=archive_path)
             traj_list.append(curr_frames)
         
-        target_fpath = self.directory/self.xyz_fname
-        if target_fpath.exists() and target_fpath.stat().st_size != 0:
-            # read current
-            traj_list.append(read(self.directory/self.xyz_fname, index=":"))
-        else:
-            ...
+        # Even though xyz file may be empty, the read can give a empty list...
+        curr_frames = self._read_a_single_trajectory(self.directory, archive_path=archive_path)
+        traj_list.append(curr_frames)
         
         # -- concatenate
         traj_frames, ntrajs = [], len(traj_list)
@@ -496,6 +559,9 @@ class AseDriver(AbstractDriver):
                 if nframes > 0: # for compat
                     traj_frames[0].info["error"] = f"Unconverged SCF at {self.directory}."
                 traj_frames.error = True
+        else:
+            # TODO: How about archived data?
+            ...
 
         return traj_frames
 

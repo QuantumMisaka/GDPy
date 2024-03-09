@@ -5,9 +5,14 @@ import copy
 import json
 import logging
 import pathlib
+import traceback
+
 import yaml
 
-from gdpx import config
+import omegaconf
+from omegaconf import OmegaConf
+
+from .. import config
 from .utils import create_variable, create_operation, traverse_postorder
 
 cache_nodes = {}
@@ -55,8 +60,6 @@ def resolve_operations(config: dict):
 def run_session(config_filepath, feed_command=None, directory="./"):
     """Configure session with omegaconfig."""
     directory = pathlib.Path(directory)
-
-    from omegaconf import OmegaConf
 
     # - add resolvers
     def create_vx_instance(vx_name, _root_):
@@ -108,21 +111,6 @@ def run_session(config_filepath, feed_command=None, directory="./"):
         "yaml", read_yaml
     )
 
-    # -- 
-    from gdpx.builder.interface import build
-    def load_structure(x):
-        """"""
-        builder = create_variable(
-            "structure", {"type": "builder", "method": "direct", "frames": x}
-        )
-        node = build(builder)
-
-        return node
-
-    OmegaConf.register_new_resolver(
-        "structure",  load_structure
-    )
-
     # - load configuration and resolve it
     conf = OmegaConf.load(config_filepath)
 
@@ -151,7 +139,14 @@ def run_session(config_filepath, feed_command=None, directory="./"):
     #for k, v in container.items():
     #    print(k, v)
 
-    operations = resolve_operations(conf["operations"])
+    try:
+        operations = resolve_operations(conf["operations"])
+    except omegaconf.errors.InterpolationResolutionError as err:
+        config._debug (traceback.format_exc())
+        err_key = (str(err).strip().split("\n")[1]).strip().split(":")[1]
+        config._print(f"FAILED TO PARSE `{err_key}` KEY.")
+        exit()
+
     container = {}
     for k, v in conf["sessions"].items():
         container[k] = operations[v]
@@ -173,9 +168,9 @@ def run_session(config_filepath, feed_command=None, directory="./"):
     # - get session general configs
     sconfigs = conf.get("configs", {})
 
-    exec_mode = sconfigs.get("mode", "seq")
-    if exec_mode == "seq":
-        from .session import Session
+    exec_mode = sconfigs.get("mode", "basic")
+    if exec_mode == "basic": # sequential
+        from .basic import Session
         # -- sequential
         for i, (k, v) in enumerate(container.items()):
             n = session_names[i]
@@ -184,8 +179,8 @@ def run_session(config_filepath, feed_command=None, directory="./"):
             entry_operation = v
             session = Session(directory=directory/n)
             session.run(entry_operation, feed_dict={})
-    elif exec_mode == "act":
-        from .otf import ActiveSession
+    elif exec_mode == "active":
+        from .active import ActiveSession
         assert len(container) == 1, "ActiveSession only accepts one operation."
         for i, (k, v) in enumerate(container.items()):
             n = session_names[i]
@@ -197,7 +192,7 @@ def run_session(config_filepath, feed_command=None, directory="./"):
             )
             session.run(entry_operation, feed_dict={})
     elif exec_mode == "cyc":
-        from .otf import CyclicSession
+        from .active import CyclicSession
         # -- iterative
         session = CyclicSession(directory="./")
         session.run(
@@ -206,7 +201,7 @@ def run_session(config_filepath, feed_command=None, directory="./"):
         )
     elif exec_mode == "otf":
         config._print("Use OTF Session...")
-        from .otf import OTFSession
+        from .active import OTFSession
         for i, (k, v) in enumerate(container.items()):
             n = session_names[i]
             if n is None:
@@ -215,7 +210,7 @@ def run_session(config_filepath, feed_command=None, directory="./"):
             session = OTFSession(directory=directory/n)
             session.run(entry_operation, feed_dict={})
     else:
-        ...
+        raise RuntimeError(f"Unknown session type {exec_mode}.")
 
     return
 

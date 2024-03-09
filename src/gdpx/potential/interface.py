@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 
 
+import json
+import pathlib
 import re
-from typing import NoReturn
+
+import yaml
 
 from ..core.variable import Variable, DummyVariable
 from ..core.operation import Operation
@@ -76,7 +79,8 @@ class train(Operation):
 
     def __init__(
         self, dataset, trainer, potter, scheduler=DummyVariable(), size: int=1, 
-        init_models=None, active: bool=False, directory="./", *args, **kwargs
+        init_models=None, active: bool=False, share_dataset: bool=False,
+        auto_submit: bool=True, directory="./", *args, **kwargs
     ) -> None:
         """"""
         input_nodes = [dataset, trainer, scheduler, potter]
@@ -93,6 +97,9 @@ class train(Operation):
         assert len(self.init_models) == self.size, f"The number of init models {self.init_models} is inconsistent with size {self.size}."
 
         self._active = active
+
+        self._share_dataset = share_dataset
+        self._auto_submit = auto_submit
 
         return
     
@@ -117,6 +124,8 @@ class train(Operation):
                 for p in prev_wdir.iterdir():
                     if p.is_dir() and re.match("m[0-9]+", p.name):
                         prev_mdirs.append(p)
+                # TODO: replace `m` with a constant
+                prev_mdirs = sorted(prev_mdirs, key=lambda p: int(p.name[1:]))
                 init_models = [(p/trainer.frozen_name).resolve() for p in prev_mdirs]
                 for p in init_models:
                     self._print(" "*8+str(p))
@@ -127,7 +136,10 @@ class train(Operation):
             scheduler = SchedulerVariable().value
 
         # - update dir
-        worker = TrainerBasedWorker(trainer, scheduler, directory=self.directory)
+        worker = TrainerBasedWorker(
+            trainer, scheduler, share_dataset=self._share_dataset,
+            auto_submit=self._auto_submit, directory=self.directory
+        )
 
         # - run
         manager = None
@@ -148,6 +160,40 @@ class train(Operation):
             self.status = "finished"
 
         return manager
+
+@registers.operation.register
+class save_potter(Operation):
+
+    def __init__(self, potter, dst_path=None, directory="./") -> None:
+        """"""
+        input_nodes = [potter]
+        super().__init__(input_nodes, directory)
+
+        if dst_path is not None:
+            self.dst_path = pathlib.Path(dst_path).absolute()
+            suffix = self.dst_path.suffix
+            assert suffix == ".yaml", "dst_path should be either a yaml or a json file."
+        else:
+            self.dst_path = self._output_path
+
+        return
+
+    def forward(self, potter):
+        """"""
+        super().forward()
+
+        self._output_path = self.directory/"potter.yaml"
+        with open(self._output_path, "w") as fopen:
+            yaml.safe_dump(potter.as_dict(), fopen, indent=2)
+        
+        if self.dst_path.exists():
+            self._print("remove previous potter...")
+            self.dst_path.unlink()
+        self.dst_path.symlink_to(self._output_path)
+
+        self.status = "finished"
+
+        return potter
 
 
 if __name__ == "__main__":

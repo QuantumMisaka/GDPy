@@ -89,13 +89,17 @@ class XyzDataloader(AbstractDataloader):
             "+".join(str(x.relative_to(self.directory)).split("/")) for x in data_dirs
         ]
 
-        frames_list = []
-        for p in data_dirs:
+        nframes_tot, frames_list = 0, []
+        for i, p in enumerate(data_dirs):
             curr_frames = []
             xyzpaths = sorted(list(p.glob("*.xyz")))
             for x in xyzpaths:
                 curr_frames.extend(read(x, ":"))
+            curr_nframes = len(curr_frames)
+            nframes_tot += curr_nframes
+            self._debug(f"{i:>4d} {str(p)} -> {len(curr_frames)}")
             frames_list.append(curr_frames)
+        self._debug(f"Number of frames: {nframes_tot}")
         
         pairs = []
         for n, x in zip(names, frames_list):
@@ -112,7 +116,7 @@ class XyzDataloader(AbstractDataloader):
         """
         data_dirs = self.load()
         self._print(data_dirs)
-        self._print("\n--- auto data reader ---\n")
+        self._print("--- auto data reader ---")
 
         batchsizes = self.batchsize
         nsystems = len(data_dirs)
@@ -128,7 +132,7 @@ class XyzDataloader(AbstractDataloader):
         for i, (cur_system, curr_batchsize) in enumerate(zip(data_dirs, batchsizes)):
             cur_system = pathlib.Path(cur_system)
             set_names.append(cur_system.name)
-            self._print(f"System {cur_system.stem} Batchsize {curr_batchsize}\n")
+            self._print(f"System {cur_system.stem} Batchsize {curr_batchsize}")
             frames = [] # all frames in this subsystem
             subsystems = list(cur_system.glob("*.xyz"))
             subsystems.sort() # sort by alphabet
@@ -137,7 +141,7 @@ class XyzDataloader(AbstractDataloader):
                 p_frames = read(p, ":")
                 p_nframes = len(p_frames)
                 frames.extend(p_frames)
-                self._print(f"  subsystem: {p.name} number {p_nframes}\n")
+                self._print(f"  subsystem: {p.name} number {p_nframes}")
 
             # split dataset and get adjusted batchsize
             # TODO: adjust batchsize of train and test separately
@@ -190,12 +194,12 @@ class XyzDataloader(AbstractDataloader):
                 # test
                 test_frames.append(curr_test_frames)
                 n_test_frames = sum([len(x) for x in test_frames])
-            self._print(f"  Current Dataset -> ntrain: {n_train_frames} ntest: {n_test_frames}\n\n")
+            self._print(f"  Current Dataset -> ntrain: {n_train_frames} ntest: {n_test_frames}")
 
         assert len(train_size) == len(test_size), "inconsistent train_size and test_size"
         train_size = sum(train_size)
         test_size = sum(test_size)
-        self._print(f"Total Dataset -> ntrain: {train_size} ntest: {test_size}\n")
+        self._print(f"Total Dataset -> ntrain: {train_size} ntest: {test_size}")
 
         return set_names, train_frames, test_frames, adjusted_batchsizes
     

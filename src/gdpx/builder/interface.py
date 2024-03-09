@@ -2,9 +2,13 @@
 # -*- coding: utf-8 -*-
 
 import copy
+import collections
 import itertools
 import pathlib
+
 from typing import NoReturn, List, Union
+
+import omegaconf
 
 import numpy as np
 
@@ -53,7 +57,7 @@ class read_stru(Operation):
         """"""
         super().__init__(input_nodes, directory)
 
-        self.fname = fname
+        self.fname = fname # This is broadcastable...
         self.format = format
         self.index = index
         self.kwargs = kwargs
@@ -63,14 +67,55 @@ class read_stru(Operation):
     def forward(self, *args, **kwargs) -> AtomsNDArray:
         """"""
         super().forward()
-        frames = read(self.fname, format=self.format, index=self.index, **self.kwargs)
-        if isinstance(frames, Atoms):
-            frames = [frames] # if index is single, then read will give Atoms
+
+        # - check params
+        if isinstance(self.fname, str):
+            fname_ = [self.fname]
+        else: # assume it is an iterable object
+            fname_ = self.fname
+
+        # - read structures
+        frames = []
+        for curr_fname in fname_:
+            self._print(f"read {curr_fname}")
+            curr_frames = read(curr_fname, format=self.format, index=self.index, **self.kwargs)
+            if isinstance(curr_frames, Atoms):
+                curr_frames = [curr_frames] # if index is single, then read will give Atoms
+            frames.extend(curr_frames)
+
         frames = AtomsNDArray(frames)
+        self._print(f"shape of structures: {frames.shape}")
 
         self.status = "finished"
 
         return frames
+
+@registers.operation.register
+class write_stru(Operation):
+
+    def __init__(
+            self, fname, structures, format="extxyz", directory="./", 
+            *args, **kwargs
+        ) -> None:
+        """"""
+        input_nodes = [structures]
+        super().__init__(input_nodes, directory)
+
+        self.fname = fname
+        self.format = format
+        self.kwargs = kwargs
+
+        return
+    
+    def forward(self, structures, *args, **kwargs):
+        """"""
+        super().forward()
+
+        write(self.directory/self.fname, structures, format=self.format)
+
+        self.status = "finished"
+
+        return
 
 @registers.operation.register
 class xbuild(Operation):
@@ -143,6 +188,14 @@ class modify(Operation):
         self.repeat = repeat # repeat modification times for one structure
 
         return
+    
+    def _preprocess_input_nodes(self, input_nodes):
+        """"""
+        substrates, modifier = input_nodes
+        if isinstance(modifier, dict) or isinstance(modifier, omegaconf.dictconfig.DictConfig):
+            modifier = BuilderVariable(directory=self.directory/"modifier", **modifier)
+
+        return substrates, modifier
     
     def forward(self, substrates: List[Atoms], modifier) -> List[Atoms]:
         """Modify inputs structures.

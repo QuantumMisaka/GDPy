@@ -3,11 +3,14 @@
 
 import os
 import copy
+import io
+import itertools
 import shutil
 import warnings
 import subprocess
 import pathlib
-from pathlib import Path
+import pickle
+import tarfile
 import dataclasses
 
 from collections.abc import Iterable
@@ -21,7 +24,7 @@ from ase.data import atomic_numbers, atomic_masses
 from ase.io import read, write
 from ase.io.lammpsrun import read_lammps_dump_text
 from ase.io.lammpsdata import read_lammps_data, write_lammps_data
-from ase.calculators.lammps import unitconvert
+from ase.calculators.lammps import unitconvert, Prism
 from ase.calculators.calculator import (
     CalculationFailed,
     Calculator, all_changes, PropertyNotImplementedError, FileIOCalculator
@@ -45,6 +48,7 @@ class AseLammpsSettings:
     input_fname: str = "in.lammps"
     log_filename: str = "log.lammps"
     deviation_filename: str = "model_devi.out"
+    prism_filename: str = "ase-prism.bindat"
 
 #: Instance.
 ASELMPCONFIG = AseLammpsSettings()
@@ -57,13 +61,9 @@ def parse_type_list(atoms):
 
     return type_list
 
-def parse_thermo_data(logfile_path) -> dict:
+def parse_thermo_data(lines) -> dict:
     """Read energy ... results from log.lammps file."""
-    # - read thermo data
-    # better move to calculator class
-    with open(logfile_path, "r") as fopen:
-        lines = fopen.readlines()
-    
+    # - parse input lines
     found_error = False
     start_idx, end_idx = None, None
     for idx, line in enumerate(lines):
@@ -105,7 +105,7 @@ def parse_thermo_data(logfile_path) -> dict:
     config._debug(f"Sanitised lammps LOG index: {start_idx} {end_idx}")
 
     if start_idx is None or end_idx is None:
-        raise RuntimeError(f"Error in lammps output of {str(logfile_path)} with start {start_idx} end {end_idx}.")
+        raise RuntimeError(f"Error in lammps output with start {start_idx} end {end_idx}.")
     end_info = lines[end_idx] # either loop time or error
     config._debug(f"lammps END info: {end_info}")
 
@@ -115,7 +115,7 @@ def parse_thermo_data(logfile_path) -> dict:
     # TODO: save timestep info?
     thermo_keywords = lines[start_idx].strip().split()
     if "PotEng" not in thermo_keywords:
-        raise RuntimeError(f"Cant find PotEng in lammps output of {str(logfile_path)}.")
+        raise RuntimeError(f"Cant find PotEng in lammps output.")
     thermo_data = []
     for x in lines[start_idx+1:end_idx]:
         x_data = x.strip().split()
@@ -130,28 +130,83 @@ def parse_thermo_data(logfile_path) -> dict:
 
     return thermo_dict, end_info
 
-def read_single_simulation(directory, prefix, units, add_step_info=True):
+def read_single_simulation(
+        mdir, wdir: pathlib.Path, prefix: str, units: str, add_step_info=True,
+        archive_path: pathlib.Path=None
+    ):
     """"""
+    # - get FileIO
+    if archive_path is None:
+        traj_io = open(wdir/ASELMPCONFIG.trajectory_filename, "r")
+        log_io = open(wdir/ASELMPCONFIG.log_filename, "r")
+        prism_file = wdir/ASELMPCONFIG.prism_filename
+        if prism_file.exists():
+            prism_io = open(prism_file, "rb")
+        else:
+            prism_io = None
+        devi_path = wdir / (prefix+ASELMPCONFIG.deviation_filename)
+        if devi_path.exists():
+            devi_io = open(devi_path, "r")
+        else:
+            devi_io = None
+        colvar_path = wdir/"COLVAR"
+        if colvar_path.exists():
+            colvar_io = open(colvar_path, "r")
+        else:
+            colvar_io = None
+    else:
+        rpath = wdir.relative_to(mdir.parent)
+        traj_tarname = str(rpath/ASELMPCONFIG.trajectory_filename)
+        prism_tarname = str(rpath/ASELMPCONFIG.prism_filename)
+        log_tarname = str(rpath/ASELMPCONFIG.log_filename)
+        devi_tarname = str(rpath/ASELMPCONFIG.deviation_filename)
+        colvar_tarname = str(rpath/"COLVAR")
+        prism_io, devi_io, colvar_io = None, None, None
+        with tarfile.open(archive_path, "r:gz") as tar:
+            for tarinfo in tar:
+                if tarinfo.name.startswith(wdir.name):
+                    if tarinfo.name == traj_tarname:
+                        traj_io = io.StringIO(tar.extractfile(tarinfo.name).read().decode())
+                    elif tarinfo.name == prism_tarname:
+                        prism_io = io.BytesIO(tar.extractfile(tarinfo.name).read())
+                    elif tarinfo.name == log_tarname:
+                        log_io = io.StringIO(tar.extractfile(tarinfo.name).read().decode())
+                    elif tarinfo.name == devi_tarname:
+                        devi_io = io.StringIO(tar.extractfile(tarinfo.name).read().decode())
+                    elif tarinfo.name == colvar_tarname:
+                        colvar_io = io.StringIO(tar.extractfile(tarinfo.name).read().decode())
+                    else:
+                        ...
+                else:
+                    continue
+            else: # TODO: if not find target traj?
+                ...
+
     # - read timesteps
     timesteps = []
-    with open(directory/ASELMPCONFIG.trajectory_filename, "r") as fopen:
-        while True:
-            line = fopen.readline()
-            if "TIMESTEP" in line:
-                timesteps.append(int(fopen.readline().strip()))
-            if not line:
-                break
+    while True:
+        line = traj_io.readline()
+        if "TIMESTEP" in line:
+            timesteps.append(int(traj_io.readline().strip()))
+        if not line:
+            break
+    traj_io.seek(0)
 
-    # skip last frame
+    # - read structure trajectory
+    if prism_io is not None:
+        prismobj = pickle.load(prism_io)
+    else:
+        prismobj = None
+
     curr_traj_frames_ = read(
-        directory/(prefix+ASELMPCONFIG.trajectory_filename), 
-        index=":", format="lammps-dump-text", units=units
+        traj_io, 
+        index=":", format="lammps-dump-text", prismobj=prismobj, units=units
     )
     nframes_traj = len(curr_traj_frames_)
     timesteps = timesteps[:nframes_traj] # avoid incomplete structure
 
     # - read thermo data
-    thermo_dict, end_info = parse_thermo_data(directory/(prefix+ASELMPCONFIG.log_filename))
+    thermo_dict, end_info = parse_thermo_data(log_io.readlines())
 
     # NOTE: last frame would not be dumpped if timestep not equals multiple*dump_period
     #       if there were any error, 
@@ -163,7 +218,7 @@ def read_single_simulation(directory, prefix, units, add_step_info=True):
     # NOTE: check whether steps in thermo and traj are consistent
     #pot_energies = pot_energies[:nframes]
     #curr_traj_frames = curr_traj_frames[:nframes]
-    #assert len(pot_energies) == len(curr_traj_frames), f"Number of pot energies and frames are inconsistent at {str(directory)}."
+    #assert len(pot_energies) == len(curr_traj_frames), f"Number of pot energies and frames are inconsistent at {str(wdir)}."
 
     curr_traj_frames, curr_energies = [], []
     for i, t in enumerate(timesteps):
@@ -181,25 +236,27 @@ def read_single_simulation(directory, prefix, units, add_step_info=True):
 
     # - check model_devi.out
     # TODO: convert units?
-    devi_path = directory / (prefix+ASELMPCONFIG.deviation_filename)
-    if devi_path.exists():
-        with open(devi_path, "r") as fopen:
-            lines = fopen.readlines()
+    if devi_io is not None:
+        lines = devi_io.readlines()
         if "#" in lines[0]: # the first file
             dkeys = ("".join([x for x in lines[0] if x != "#"])).strip().split()
             dkeys = [x.strip() for x in dkeys][1:]
-        else: # restart file, deepmd...
-            devi_path_0 = directory/"0000.run"/ASELMPCONFIG.deviation_filename
-            if not devi_path_0.exists():
-                devi_path_0 = directory.parent/"0000.run"/ASELMPCONFIG.deviation_filename
-            with open(devi_path_0, "r") as fopen:
-                line = fopen.readline()
-            dkeys = ("".join([x for x in line if x != "#"])).strip().split()
-            dkeys = [x.strip() for x in dkeys][1:]
-        data = np.loadtxt(devi_path, dtype=float)
+        else:
+            ...
+        devi_io.seek(0)
+        data = np.loadtxt(devi_io, dtype=float)
         ncols = data.shape[-1]
         data = data.reshape(-1, ncols)
-        data = data.transpose()[1:, :nframes]
+        # NOTE: For some minimisers, dp gives several deviations as 
+        #       multiple force evluations are performed in one step.
+        #       Thus, we only take the last occurance of the deviation in each step.
+        step_indices = []
+        steps = data[:, 0].astype(np.int32).tolist()
+        for k, v in itertools.groupby(enumerate(steps), key=lambda x: x[1]):
+            v = sorted(v, key=lambda x: x[0])
+            step_indices.append(v[-1][0])
+        data = data.transpose()[1:, step_indices[:nframes]]
+        #config._print(data)
 
         for i, atoms in enumerate(curr_traj_frames):
             for j, k in enumerate(dkeys):
@@ -209,19 +266,30 @@ def read_single_simulation(directory, prefix, units, add_step_info=True):
                     # NOTE: Some potentials donot print last frames of min
                     #       for example, lammps
                     atoms.info[k] = 0.
+    else:
+        ...
     
     # - check COLVAR
-    colvar_path = directory / "COLVAR"
-    if colvar_path.exists():
+    if colvar_io is not None:
         # - read latest COLVAR Files
-        with open(colvar_path, "r") as fopen:
-            names = fopen.readline().split()[2:]
-        colvars = np.loadtxt(colvar_path)
-        print("colvars: ", colvars.shape)
+        names = colvar_io.readline().split()[2:]
+        colvar_io.seek(0)
+        colvars = np.loadtxt(colvar_io)
+        #print("colvars: ", colvars.shape)
         curr_colvars = colvars[-nframes_traj:, :]
         for i, atoms in enumerate(curr_traj_frames):
             for k, v in zip(names, curr_colvars[i, :]):
                 atoms.info[k] = v
+    
+    # - Close IO
+    traj_io.close()
+    log_io.close()
+    if prism_io is not None:
+        prism_io.close()
+    if devi_io is not None:
+        devi_io.close()
+    if colvar_io is not None:
+        colvar_io.close()
 
     return curr_traj_frames
 
@@ -392,7 +460,10 @@ class LmpDriver(AbstractDriver):
 
         return
     
-    def read_trajectory(self, type_list=None, add_step_info=True, *args, **kwargs) -> List[Atoms]:
+    def read_trajectory(
+            self, type_list=None, add_step_info=True, 
+            archive_path: pathlib.Path=None, *args, **kwargs
+        ) -> List[Atoms]:
         """Read trajectory in the current working directory."""
         if type_list is not None:
             self.calc.type_list = type_list
@@ -405,19 +476,18 @@ class LmpDriver(AbstractDriver):
         traj_list = []
         for w in prev_wdirs:
             curr_frames = read_single_simulation(
-                directory=w, prefix="", units=curr_units, 
-                add_step_info=add_step_info
+                mdir=self.directory, wdir=w, prefix="", units=curr_units, 
+                add_step_info=add_step_info, archive_path=archive_path
             )
             traj_list.append(curr_frames)
         
-        lmprun = self.directory / ASELMPCONFIG.trajectory_filename
-        if lmprun.exists() and lmprun.stat().st_size != 0:
-            traj_list.append(
-                read_single_simulation(
-                    directory=self.directory, prefix="", units=curr_units, 
-                    add_step_info=add_step_info
-                )
+        # Even though traj file may be empty, the read can give a empty list...
+        traj_list.append(
+            read_single_simulation(
+                mdir=self.directory, wdir=self.directory, prefix="", units=curr_units, 
+                add_step_info=add_step_info, archive_path=archive_path
             )
+        )
 
         # -- concatenate
         traj_frames, ntrajs = [], len(traj_list)
@@ -534,10 +604,14 @@ class Lammps(FileIOCalculator):
             self.write_velocities = (True and not self.ignore_atoms_velocities)
 
         # write structure
+        prismobj = Prism(atoms.get_cell()) # TODO: nonpbc?
+        prism_file = os.path.join(self.directory, ASELMPCONFIG.prism_filename)
+        with open(prism_file, "wb") as fopen:
+            pickle.dump(prismobj, fopen)
         stru_data = os.path.join(self.directory, ASELMPCONFIG.inputstructure_filename)
         write_lammps_data(
             stru_data, atoms, specorder=self.type_list, 
-            force_skew=True, prismobj=None, velocities=self.write_velocities,
+            force_skew=True, prismobj=prismobj, velocities=self.write_velocities,
             units=self.units, atom_style=self.atom_style
         )
 
@@ -554,7 +628,7 @@ class Lammps(FileIOCalculator):
         """
 
         is_finished, end_info = False, "not finished"
-        log_filepath = Path(os.path.join(self.directory, ASELMPCONFIG.log_filename))
+        log_filepath = pathlib.Path(os.path.join(self.directory, ASELMPCONFIG.log_filename))
 
         if log_filepath.exists():
             ERR_FLAG = "ERROR: "
@@ -585,8 +659,9 @@ class Lammps(FileIOCalculator):
 
         # - Be careful with UNITS
         # read forces from dump file
+        curr_wdir = pathlib.Path(self.directory)
         self.cached_traj_frames = read_single_simulation(
-            directory=pathlib.Path(self.directory), prefix="", 
+            mdir=curr_wdir, wdir=curr_wdir, prefix="", 
             units=self.units, add_step_info=True
         )
         converged_frame = self.cached_traj_frames[-1]
@@ -601,7 +676,7 @@ class Lammps(FileIOCalculator):
 
         return
 
-    def _write_input(self, atoms) -> NoReturn:
+    def _write_input(self, atoms) -> None:
         """Write input file in.lammps"""
         # - write in.lammps
         content =  f"restart         {self.ckpt_period}  restart.*.data\n\n"

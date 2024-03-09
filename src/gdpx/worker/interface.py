@@ -9,6 +9,8 @@ from typing import NoReturn, List
 
 import numpy as np
 
+import omegaconf
+
 from ase import Atoms
 from ase.io import read, write
 from ase.geometry import find_mic
@@ -16,6 +18,7 @@ from ase.geometry import find_mic
 from ..core.operation import Operation
 from ..core.variable import Variable
 from ..core.register import registers
+from ..utils.command import parse_input_file
 
 from ..computation.driver import AbstractDriver
 from ..data.array import AtomsNDArray
@@ -31,6 +34,63 @@ from .single import SingleWorker
 DEFAULT_MAIN_DIRNAME = "MyWorker"
 
 
+def convert_config_to_potter(config):
+    """Convert a configuration file or a dict to a potter/reactor."""
+    if isinstance(config, dict):
+        params = config
+    else: # assume it is json or yaml
+        params = parse_input_file(input_fpath=config)
+
+    ptype = params.pop("type", "computer")
+    if ptype == "computer":
+        from gdpx.worker.interface import ComputerVariable
+        potter = ComputerVariable(
+            params["potential"], params.get("driver", {}), params.get("scheduler", {}),
+            batchsize=params.get("batchsize", 1), 
+            share_wdir=params.get("share_wdir", False),
+            use_single=params.get("use_single", False), 
+            retain_info=params.get("retain_info", False), 
+        ).value[0]
+    elif ptype == "reactor":
+        from gdpx.reactor.interface import ReactorVariable
+        potter = ReactorVariable(
+            potter=params["potter"], driver=params.get("driver", None), 
+            scheduler=params.get("scheduler", {}), batchsize=params.get("batchsize", 1)
+        ).value[0]
+    else:
+        ...
+
+    return potter
+
+def convert_input_to_potter(inp):
+    """"""
+    potter = None
+    if isinstance(inp, AbstractPotentialManager):
+        potter = inp
+    elif isinstance(inp, Variable):
+        potter = inp.value
+    elif isinstance(inp, dict) or isinstance(inp, omegaconf.dictconfig.DictConfig):
+        potter_params = copy.deepcopy(inp)
+        name = potter_params.get("name", None)
+        potter = registers.create(
+            "manager", name, convert_name=True,
+        )
+        potter.register_calculator(potter_params.get("params", {}))
+        potter.version = potter_params.get("version", "unknown")
+    elif isinstance(inp, str) or isinstance(inp, pathlib.Path):
+        potter_params = parse_input_file(input_fpath=inp)
+        name = potter_params.get("name", None)
+        potter = registers.create(
+            "manager", name, convert_name=True,
+        )
+        potter.register_calculator(potter_params.get("params", {}))
+        potter.version = potter_params.get("version", "unknown")
+    else:
+        raise RuntimeError(f"Unknown {inp} of type {type(inp)} for the potter.")
+
+    return potter
+
+
 @registers.variable.register
 class ComputerVariable(Variable):
 
@@ -42,7 +102,7 @@ class ComputerVariable(Variable):
     ):
         """"""
         # - save state by all nodes
-        self.potter = self._load_potter(potter)
+        self.potter = convert_input_to_potter(potter)
         self.driver = self._load_driver(driver) 
         self.scheduler = self._load_scheduler(scheduler)
 
@@ -59,26 +119,6 @@ class ComputerVariable(Variable):
         self.use_single = use_single
 
         return
-    
-    def _load_potter(self, inp):
-        """"""
-        potter = None
-        if isinstance(inp, AbstractPotentialManager):
-            potter = inp
-        elif isinstance(inp, Variable):
-            potter = inp.value
-        elif isinstance(inp, dict):
-            potter_params = copy.deepcopy(inp)
-            name = potter_params.get("name", None)
-            potter = registers.create(
-                "manager", name, convert_name=True,
-            )
-            potter.register_calculator(potter_params.get("params", {}))
-            potter.version = potter_params.get("version", "unknown")
-        else:
-            raise RuntimeError(f"Unknown {inp} for the potter.")
-
-        return potter
     
     def _load_driver(self, inp) -> List[dict]:
         """Load drivers from a Variable or a dict."""
@@ -184,7 +224,8 @@ class ComputerVariable(Variable):
 
 def run_worker(
     structure: str, directory=pathlib.Path.cwd()/DEFAULT_MAIN_DIRNAME,
-    worker: DriverBasedWorker=None, output: str=None, batch: int=None
+    worker: DriverBasedWorker=None, output: str=None, batch: int=None,
+    spawn: bool=False, archive: bool=False
 ):
     """"""
     # - some imported packages change `logging.basicConfig` 
@@ -211,20 +252,21 @@ def run_worker(
 
     _ = worker.run(frames, batch=batch)
     worker.inspect(resubmit=True)
-    if worker.get_number_of_running_jobs() == 0:
+    if not spawn and worker.get_number_of_running_jobs() == 0: 
+        # BUG: bacthes may conflict to save results
         # - report
         res_dir = directory/"results"
         if not res_dir.exists():
             res_dir.mkdir(exist_ok=True)
 
-            ret = worker.retrieve(include_retrieved=True)
+            ret = worker.retrieve(include_retrieved=True, use_archive=archive)
             if not isinstance(worker.driver, AbstractReactor):
                 end_frames = [traj[-1] for traj in ret]
                 write(res_dir/"end_frames.xyz", end_frames)
             else:
                 ...
 
-            AtomsNDArray(ret).save_file(res_dir/"trajs.h5")
+            #AtomsNDArray(ret).save_file(res_dir/"trajs.h5")
         else:
             print("Results have already been retrieved.")
 

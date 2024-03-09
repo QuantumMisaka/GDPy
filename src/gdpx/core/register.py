@@ -92,6 +92,9 @@ class registers:
     #: Builders.
     builder: Register = Register("builder")
 
+    #: Colvars.
+    colvar: Register = Register("colvar")
+
     #: Modifiers.
     modifier: Register = Register("modifier")
 
@@ -146,20 +149,14 @@ ALL_MODULES = [
     ("gdpx.scheduler", SCHEDULER_MODULES),
     # -- managers (potentials)
     ("gdpx.potential", ["managers"]),
-    ("gdpx.potential.managers", [
-        "vasp", "espresso", "cp2k", 
-        "xtb",
-        "eam", "emt", "reax", 
-        "eann", "deepmd", "lasp", "nequip", "schnet"
-    ]),
-    # -- trainers (potentials)
-    ("gdpx.potential.managers", ["deepmd"]),
     # -- dataloaders (datasets)
     ("gdpx.data", ["dataset"]),
     # -- region
     ("gdpx.builder", ["region"]),
     # -- builders
     ("gdpx", ["builder"]),
+    # -- colvar
+    ("gdpx", ["colvar"]),
     # -- genetic-algorithm-related
     ("gdpx.builder", ["crossover", "mutation"]),
     # -- selectors
@@ -179,10 +176,8 @@ ALL_MODULES = [
     # - session operations + variables.
     ("gdpx.builder", ["interface"]),
     ("gdpx.computation", ["interface"]),
-    ("gdpx.computation", ["operations"]),
     ("gdpx", ["data"]),
     ("gdpx.data", ["interface"]),
-    ("gdpx.data", ["operations"]), 
     ("gdpx.describer", ["interface"]),
     ("gdpx.potential", ["interface"]),
     ("gdpx.reactor", ["interface"]),
@@ -196,13 +191,13 @@ ALL_MODULES = [
 
 def _handle_errors(errors):
     """Log out and possibly reraise errors during import."""
-    if not errors:
-        return
-    
     names = [] # unimported module names
-    for name, err in errors:
-        #warnings.warn("Module {} import failed: {}".format(name, err), UserWarning)
-        names.append(name)
+    if errors:
+        for name, err in errors:
+            warnings.warn("Module {} import failed: {}".format(name, err), UserWarning)
+            names.append(name)
+    else:
+        ...
     
     return names
 

@@ -48,6 +48,13 @@ class Variable:
         self._directory = pathlib.Path(directory_)
 
         return
+    
+    def reset(self):
+        """Reset node's output and status."""
+        if hasattr(self, "output"):
+            delattr(self, "output")
+
+        return
 
 
 class DummyVariable(Variable):

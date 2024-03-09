@@ -27,19 +27,20 @@ class Operation(abc.ABC):
 
     def __init__(self, input_nodes=[], directory="./") -> None:
         """"""
-        self.input_nodes = input_nodes
+        if hasattr(self, "_preprocess_input_nodes"):
+            self.input_nodes = self._preprocess_input_nodes(input_nodes)
+        else:
+            self.input_nodes = input_nodes
 
         self.directory = directory
 
-        # Initialize list of consumers (i.e. nodes that receive this operation's output as input)
+        # Initialize list of consumers 
+        # (i.e. nodes that receive this operation's output as input)
         self.consumers = []
 
         # Append this operation to the list of consumers of all input nodes
-        for input_node in input_nodes:
+        for input_node in self.input_nodes:
             input_node.consumers.append(self)
-
-        # Append this operation to the list of operations in the currently active default graph
-        #_default_graph.operations.append(self)
 
         return
 
@@ -55,8 +56,16 @@ class Operation(abc.ABC):
         self._directory = pathlib.Path(directory_)
 
         return
+
+    def reset(self):
+        """Reset node's output and status."""
+        if hasattr(self, "output"):
+            delattr(self, "output")
+            self.status = "unfinished" 
+
+        return
     
-    def preward(self) -> bool:
+    def is_ready_to_forward(self) -> bool:
         """Check whether this operation is ready to forward."""
         # - check input nodes' status
         status = [node.status == "finished" for node in self.input_nodes]

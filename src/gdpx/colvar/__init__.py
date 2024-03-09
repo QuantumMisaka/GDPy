@@ -7,21 +7,16 @@ try:
 except Exception as e:
     ...
 
-from ..core.register import Register
-colvar_register = Register("colvar")
+from ..core.register import registers
+
+from .distance import DistanceColvar
+registers.colvar.register("DistanceColvar")(DistanceColvar)
+
+from .fingerprint import FingerprintColvar
+registers.colvar.register("FingerprintColvar")(FingerprintColvar)
 
 from .position import position
-colvar_register.register("position")(position)
-
-
-def initiate_colvar(params):
-    """"""
-    name = params.pop("name", )
-
-    cvfunc = colvar_register[name]
-    cvfunc = jax.tree_util.Partial(cvfunc, **params)
-
-    return cvfunc
+registers.colvar.register("position")(position)
 
 
 if __name__ == "__main__":

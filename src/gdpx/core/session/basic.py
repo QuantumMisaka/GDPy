@@ -13,9 +13,9 @@ import numpy as np
 from ase import Atoms
 from ase.io import read, write
 
-from gdpx import config
-from gdpx.core.placeholder import Placeholder
-from gdpx.core.variable import Variable
+from .. import config
+from ..placeholder import Placeholder
+from ..variable import Variable
 from .utils import traverse_postorder
 
 
@@ -38,10 +38,13 @@ class Session:
         """"""
         # - find forward order
         nodes_postorder = traverse_postorder(operation)
-        #print(f"number_of_nodes: {len(nodes_postorder)}")
-        #for n in nodes_postorder:
-        #    print(n)
-        #exit()
+        for node in nodes_postorder:
+            if hasattr(node, "_active") and node._active:
+                node._active = False
+                self._print(
+                    f"Set {node} active to false as it is not supported in a basic session"
+                )
+
         self._print(
             "[{:^24s}] NUM_NODES: {} AT MAIN: {}".format(
                 "START", len(nodes_postorder), str(self.directory)
@@ -71,7 +74,7 @@ class Session:
                 node.output = node.value
             else: # Operation
                 self._debug(f"node: {node}")
-                if node.preward():
+                if node.is_ready_to_forward():
                     node.inputs = [input_node.output for input_node in node.input_nodes]
                     node.output = node.forward(*node.inputs)
                 else:

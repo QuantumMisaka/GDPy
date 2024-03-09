@@ -14,12 +14,10 @@ import numpy as np
 from ase.io import read, write
 from ase.calculators.calculator import Calculator
 
-from gdpx.core.register import registers
-from gdpx.potential.manager import AbstractPotentialManager, DummyCalculator
-from gdpx.potential.trainer import AbstractTrainer
+from . import AbstractPotentialManager, AbstractTrainer, DummyCalculator
 from gdpx.computation.mixer import CommitteeCalculator
 
-@registers.trainer.register
+
 class NequipTrainer(AbstractTrainer):
 
     name = "nequip"
@@ -80,7 +78,7 @@ class NequipTrainer(AbstractTrainer):
         # - check dataset
         data_dirs = dataset.load()
         self._print(data_dirs)
-        self._print("\n--- auto data reader ---\n")
+        self._print("--- auto data reader ---")
 
         frames = []
         for i, curr_system in enumerate(data_dirs):
@@ -94,7 +92,7 @@ class NequipTrainer(AbstractTrainer):
                 p_frames = read(p, ":")
                 p_nframes = len(p_frames)
                 curr_frames.extend(p_frames)
-                self._print(f"  subsystem: {p.name} number {p_nframes}\n")
+                self._print(f"  subsystem: {p.name} number {p_nframes}")
             self._print(f"  nframes {len(curr_frames)}")
             frames.extend(curr_frames)
         nframes = len(frames)
@@ -151,7 +149,6 @@ class NequipTrainer(AbstractTrainer):
         return converged
 
 
-@registers.manager.register
 class NequipManager(AbstractPotentialManager):
 
     name = "nequip"

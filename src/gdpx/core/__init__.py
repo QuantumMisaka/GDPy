@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-def bond(positions, ):
-    """"""
 
-    return # positions[:, axis]
+from .. import config
 
 
 if __name__ == "__main__":

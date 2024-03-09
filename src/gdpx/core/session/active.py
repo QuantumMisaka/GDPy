@@ -7,10 +7,10 @@ import time
 
 from typing import NoReturn, Union, List, Callable
 
-from gdpx import config
+from .. import config
 from ..placeholder import Placeholder
 from ..variable import Variable
-from .session import Session
+from .basic import Session
 from .utils import traverse_postorder
 
 
@@ -49,23 +49,27 @@ class ActiveSession():
                 self._print("wait current iteration to finish...")
                 break
             else:
-                with open(curr_wdir/"FINISHED", "w") as fopen:
-                    fopen.write(
-                        f"FINISHED AT {time.asctime( time.localtime(time.time()) )}."
-                    )
-                # --- report
-                self._print("[{:^24s}]".format("CONVERGENCE"))
-                converged_list = []
-                for node in nodes_postorder:
-                    if hasattr(node, "report_convergence"):
-                        converged = node.report_convergence()
-                        converged_list.append(converged)
-                if all(converged_list):
-                    self._print(f"Active Session converged at step {curr_step}.")
-                    break
+                # NOTE: If previous step finished, the nodes may not have outputs
+                #       as we skip them...
+                if not (curr_wdir/"FINISHED").exists():
+                    with open(curr_wdir/"FINISHED", "w") as fopen:
+                        fopen.write(
+                            f"FINISHED AT {time.asctime( time.localtime(time.time()) )}."
+                        )
+                    # --- report
+                    self._print("[{:^24s}]".format("CONVERGENCE"))
+                    converged_list = []
+                    for node in nodes_postorder:
+                        if hasattr(node, "report_convergence"):
+                            converged = node.report_convergence()
+                            converged_list.append(converged)
+                    if all(converged_list):
+                        self._print(f"Active Session converged at step {curr_step}.")
+                        break
+                    else:
+                        self._print(f"Active Session UNconverged at step {curr_step}.")
                 else:
-                    self._print(f"Active Session UNconverged at step {curr_step}.")
-                ...
+                    self._print("[{:^24s}] FINISHED".format(f"STEP.{str(curr_step).zfill(4)}"))
         else:
             ... # ALL iterations finished...
 
@@ -75,6 +79,13 @@ class ActiveSession():
         """"""
         if (wdir/"FINISHED").exists():
             return True
+        
+        # - clear previous nodes' outputs
+        #   somtimes two steps run consecutively and some nodes in the second step
+        #   breaks and make its following nodes use outputs from the last step,
+        #   which is a hidden error
+        for node in nodes_postorder:
+            node.reset()
 
         # - find forward order
         self._print(
@@ -113,7 +124,7 @@ class ActiveSession():
                 node.output = node.value
             else: # Operation
                 self._debug(f"node: {node}")
-                if node.preward():
+                if node.is_ready_to_forward():
                     node.inputs = [input_node.output for input_node in node.input_nodes]
                     node.output = node.forward(*node.inputs)
                 else:
@@ -197,7 +208,7 @@ class OTFSession():
                 node.output = node.value
             else: # Operation
                 self._debug(f"node: {node}")
-                if node.preward():
+                if node.is_ready_to_forward():
                     node.inputs = [input_node.output for input_node in node.input_nodes]
                     node.output = node.forward(*node.inputs)
                 else:
@@ -312,7 +323,7 @@ class CyclicSession:
             elif isinstance(node, Variable):
                 node.output = node.value
             else: # Operation
-                if node.preward():
+                if node.is_ready_to_forward():
                     node.inputs = [input_node.output for input_node in node.input_nodes]
                     node.output = node.forward(*node.inputs)
                 else:

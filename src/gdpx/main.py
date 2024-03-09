@@ -12,6 +12,7 @@ import numpy as np
 # global settings
 from gdpx import config
 from gdpx.core.register import registers, import_all_modules_for_register
+from gdpx.utils.command import parse_input_file
 
 
 def main():
@@ -102,7 +103,7 @@ def main():
     # - automatic training
     parser_train = subparsers.add_parser(
         "train", help="automatic training utilities",
-        description=str(registers.trainer), 
+        description=str(registers.trainer)+"\n"+str(registers.dataloader), 
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser_train.add_argument(
@@ -126,6 +127,14 @@ def main():
     parser_compute.add_argument(
         "-o", "--output", default="last", choices=["last","traj"],
         help="retrieve last frame or entire trajectory"
+    )
+    parser_compute.add_argument(
+        "--spawn", action="store_true",
+        help="If the computation is spawned, it will not save results when all jobs are finished."
+    )
+    parser_compute.add_argument(
+        "--archive", action="store_true",
+        help="whether archive computation folders when retrieve"
     )
 
     # --- expedition interface
@@ -198,28 +207,10 @@ def main():
         config._print(f"Use {config.NJOBS} processors.")
 
     # - potential
-    from gdpx.utils.command import parse_input_file
     potter = None
     if args.potential:
-        params = parse_input_file(input_fpath=args.potential)
-        ptype = params.pop("type", "computer")
-        if ptype == "computer":
-            from gdpx.worker.interface import ComputerVariable
-            potter = ComputerVariable(
-                params["potential"], params.get("driver", {}), params.get("scheduler", {}),
-                batchsize=params.get("batchsize", 1), 
-                share_wdir=params.get("share_wdir", False),
-                use_single=params.get("use_single", False), 
-                retain_info=params.get("retain_info", False), 
-            ).value[0]
-        elif ptype == "reactor":
-            from gdpx.reactor.interface import ReactorVariable
-            potter = ReactorVariable(
-                potter=params["potter"], driver=params.get("driver", None), 
-                scheduler=params.get("scheduler", {}), batchsize=params.get("batchsize", 1)
-            ).value[0]
-        else:
-            ...
+        from gdpx.worker.interface import convert_config_to_potter
+        potter = convert_config_to_potter(args.potential)
 
     # - use subcommands
     if args.subcommand == "session":
@@ -240,7 +231,10 @@ def main():
         run_selection(args.CONFIG, args.structure, args.directory, potter)
     elif args.subcommand == "compute":
         from gdpx.worker.interface import run_worker
-        run_worker(args.STRUCTURE, args.directory, potter, args.output, args.batch)
+        run_worker(
+            args.STRUCTURE, args.directory, potter, args.output, args.batch, 
+            args.spawn, args.archive
+        )
     elif args.subcommand == "explore":
         from .expedition.interface import run_expedition
         params = parse_input_file(args.CONFIG)

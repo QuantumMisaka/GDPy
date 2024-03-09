@@ -5,15 +5,14 @@ import os
 import pathlib
 from typing import NoReturn
 
-from gdpx.core.register import registers
-from gdpx.potential.manager import AbstractPotentialManager
+from . import AbstractPotentialManager
 
-@registers.manager.register
+
 class EmtManager(AbstractPotentialManager):
 
     name = "emt"
 
-    implemented_backends = ["ase"]
+    implemented_backends = ["emt", "ase"]
     valid_combinations = (
         ("ase", "ase"), 
     )
@@ -30,7 +29,10 @@ class EmtManager(AbstractPotentialManager):
     def register_calculator(self, calc_params, *agrs, **kwargs):
         """"""
         super().register_calculator(calc_params, *agrs, **kwargs)
+        if self.calc_backend == "emt":
+            self.calc_backend = "ase"
 
+        # NOTE: emt backend is just an alias of ase backend, they are the same.
         if self.calc_backend == "ase":
             from ase.calculators.emt import EMT
             calc_cls = EMT

@@ -16,13 +16,40 @@ from ase import Atoms
 from ase.io import read, write
 from ase.calculators.calculator import Calculator
 
-from gdpx.core.register import registers
 from gdpx.potential.manager import AbstractPotentialManager, DummyCalculator
 from gdpx.potential.trainer import AbstractTrainer
 from gdpx.computation.mixer import CommitteeCalculator
 
 
-@registers.trainer.register
+class DeepmdDataloader():
+
+    #: Datasset name.
+    name: str = "deepmd"
+
+    def __init__(
+        self, batchsizes, cum_batchsizes, train_sys_dirs, valid_sys_dirs, 
+        *args, **kwargs
+    ) -> None:
+        """"""
+        self.batchsizes = batchsizes
+        self.cum_batchsizes = cum_batchsizes
+        self.train_sys_dirs = [str(x) for x in train_sys_dirs]
+        self.valid_sys_dirs = [str(x) for x in valid_sys_dirs]
+
+        return
+    
+    def as_dict(self, ) -> dict:
+        """"""
+        params = {}
+        params["name"] = self.name
+        params["batchsizes"] = self.batchsizes
+        params["cum_batchsizes"] = self.cum_batchsizes
+        params["train_sys_dirs"] = self.train_sys_dirs
+        params["valid_sys_dirs"] = self.valid_sys_dirs
+
+        return params
+
+
 class DeepmdTrainer(AbstractTrainer):
 
     name = "deepmd"
@@ -67,7 +94,7 @@ class DeepmdTrainer(AbstractTrainer):
                 command += "--init-model {}".format(str(init_model_path))
             else:
                 raise RuntimeError(f"Unknown init_model {str(init_model_path)}.")
-        command += " 2>&1 > {}.out\n".format(self.name)
+        command += " 2>&1 > {}.out".format(self.name)
 
         return command
 
@@ -98,6 +125,41 @@ class DeepmdTrainer(AbstractTrainer):
         """"""
         return f"{self.name}.pb"
     
+    def _prepare_dataset(self, dataset, reduce_system: bool=False, *args, **kwargs):
+        """"""
+        if not self.directory.exists():
+            self.directory.mkdir(parents=True, exist_ok=True)
+        if not isinstance(dataset, DeepmdDataloader):
+            set_names, train_frames, test_frames, adjusted_batchsizes = self._get_dataset(
+                dataset, reduce_system
+            )
+
+            train_dir = self.directory
+
+            # - update config
+            self._print("--- write dp train data---")
+            batchsizes = adjusted_batchsizes
+            cum_batchsizes, train_sys_dirs = convert_groups(
+                set_names, train_frames, batchsizes, 
+                self.config["model"]["type_map"],
+                "train", train_dir, self._print
+            )
+            _, valid_sys_dirs = convert_groups(
+                set_names, test_frames, batchsizes,
+                self.config["model"]["type_map"], 
+                "valid", train_dir, self._print
+            )
+            self._print(f"accumulated number of batches: {cum_batchsizes}")
+            
+            dataset = DeepmdDataloader(
+                batchsizes, cum_batchsizes, train_sys_dirs, valid_sys_dirs
+            )
+        else:
+            ...
+
+        return dataset
+
+    
     def write_input(self, dataset, reduce_system: bool=False):
         """Write inputs for training.
 
@@ -105,25 +167,8 @@ class DeepmdTrainer(AbstractTrainer):
             reduce_system: Whether merge structures.
 
         """
-        set_names, train_frames, test_frames, adjusted_batchsizes = self._get_dataset(
-            dataset, reduce_system
-        )
-
-        train_dir = self.directory
-
-        # - update config
-        batchsizes = adjusted_batchsizes
-        cum_batchsizes, train_sys_dirs = convert_groups(
-            set_names, train_frames, batchsizes, 
-            self.config["model"]["type_map"],
-            "train", train_dir, self._print
-        )
-        _, valid_sys_dirs = convert_groups(
-            set_names, test_frames, batchsizes,
-            self.config["model"]["type_map"], 
-            "valid", train_dir, self._print
-        )
-        self._print(f"accumulated number of batches: {cum_batchsizes}")
+        # - prepare dataset (convert dataset to DeepmdDataloader)
+        dataset = self._prepare_dataset(dataset, reduce_system)
 
         # - check train config
         # NOTE: parameters
@@ -135,23 +180,23 @@ class DeepmdTrainer(AbstractTrainer):
         train_config["model"]["descriptor"]["seed"] =  self.rng.integers(0,10000, dtype=int)
         train_config["model"]["fitting_net"]["seed"] = self.rng.integers(0,10000, dtype=int)
 
-        train_config["training"]["training_data"]["systems"] = [str(x.resolve()) for x in train_sys_dirs]
-        train_config["training"]["training_data"]["batch_size"] = batchsizes
+        train_config["training"]["training_data"]["systems"] = [x for x in dataset.train_sys_dirs]
+        train_config["training"]["training_data"]["batch_size"] = dataset.batchsizes
 
-        train_config["training"]["validation_data"]["systems"] = [str(x.resolve()) for x in valid_sys_dirs]
-        train_config["training"]["validation_data"]["batch_size"] = batchsizes
+        train_config["training"]["validation_data"]["systems"] = [x for x in dataset.valid_sys_dirs]
+        train_config["training"]["validation_data"]["batch_size"] = dataset.batchsizes
 
         train_config["training"]["seed"] = self.rng.integers(0,10000, dtype=int)
 
         # --- calc numb_steps
         save_freq = train_config["training"]["save_freq"]
-        n_checkpoints = int(np.ceil(cum_batchsizes*self.train_epochs/save_freq))
+        n_checkpoints = int(np.ceil(dataset.cum_batchsizes*self.train_epochs/save_freq))
         numb_steps = n_checkpoints*save_freq
 
         train_config["training"]["numb_steps"] = numb_steps
 
         # - write
-        with open(train_dir/f"{self.name}.json", "w") as fopen:
+        with open(self.directory/f"{self.name}.json", "w") as fopen:
             json.dump(train_config, fopen, indent=2)
 
         return
@@ -159,8 +204,8 @@ class DeepmdTrainer(AbstractTrainer):
     def _get_dataset(self, dataset, reduce_system):
         """"""
         data_dirs = dataset.load()
-        self._print(data_dirs)
-        self._print("\n--- auto data reader ---\n")
+        self._print("--- auto data reader ---")
+        self._debug(data_dirs)
 
         batchsizes = dataset.batchsize
         nsystems = len(data_dirs)
@@ -177,7 +222,7 @@ class DeepmdTrainer(AbstractTrainer):
             curr_system = pathlib.Path(curr_system)
             set_name = "+".join(str(curr_system.relative_to(dataset.directory)).split("/"))
             set_names.append(set_name)
-            self._print(f"System {set_name} Batchsize {curr_batchsize}\n")
+            self._print(f"System {set_name} Batchsize {curr_batchsize}")
             frames = [] # all frames in this subsystem
             subsystems = list(curr_system.glob("*.xyz"))
             subsystems.sort() # sort by alphabet
@@ -186,7 +231,7 @@ class DeepmdTrainer(AbstractTrainer):
                 p_frames = read(p, ":")
                 p_nframes = len(p_frames)
                 frames.extend(p_frames)
-                self._print(f"  subsystem: {p.name} number {p_nframes}\n")
+                self._print(f"  subsystem: {p.name} number {p_nframes}")
 
             # split dataset and get adjusted batchsize
             # TODO: adjust batchsize of train and test separately
@@ -219,7 +264,7 @@ class DeepmdTrainer(AbstractTrainer):
             train_size.append(ntrain)
             test_size.append(ntest)
 
-            self._print(f"    ntrain: {ntrain} ntest: {ntest} ntotal: {nframes} batchsize: {new_batchsize}\n")
+            self._print(f"    ntrain: {ntrain} ntest: {ntest} ntotal: {nframes} batchsize: {new_batchsize}")
 
             curr_train_frames = [frames[train_i] for train_i in train_index]
             curr_test_frames = [frames[test_i] for test_i in test_index]
@@ -239,12 +284,12 @@ class DeepmdTrainer(AbstractTrainer):
                 # test
                 test_frames.append(curr_test_frames)
                 n_test_frames = sum([len(x) for x in test_frames])
-            self._print(f"  Current Dataset -> ntrain: {n_train_frames} ntest: {n_test_frames}\n\n")
+            self._print(f"  Current Dataset -> ntrain: {n_train_frames} ntest: {n_test_frames}")
 
         assert len(train_size) == len(test_size), "inconsistent train_size and test_size"
         train_size = sum(train_size)
         test_size = sum(test_size)
-        self._print(f"Total Dataset -> ntrain: {train_size} ntest: {test_size}\n")
+        self._print(f"Total Dataset -> ntrain: {train_size} ntest: {test_size}")
 
         return set_names, train_frames, test_frames, adjusted_batchsizes
     
@@ -254,23 +299,30 @@ class DeepmdTrainer(AbstractTrainer):
         frozen_model = super().freeze()
 
         # - compress model
-        compressed_model = self.directory/f"{self.name}-c.pb"
+        compressed_model = (self.directory/f"{self.name}-c.pb").absolute()
         if frozen_model.exists() and not compressed_model.exists():
             command = self._resolve_compress_command()
             try:
                 proc = subprocess.Popen(command, shell=True, cwd=self.directory)
             except OSError as err:
                 msg = "Failed to execute `{}`".format(command)
-                raise RuntimeError(msg) from err
+                #raise RuntimeError(msg) from err
+                #self._print(msg)
+                self._print("Failed to compress model.")
+            except RuntimeError as err:
+                self._print("Failed to compress model.")
 
             errorcode = proc.wait()
-
             if errorcode:
                 path = os.path.abspath(self.directory)
                 msg = ('Trainer "{}" failed with command "{}" failed in '
                        '{} with error code {}'.format(self.name, command,
                                                       path, errorcode))
-                raise RuntimeError(msg)
+                # NOTE: sometimes dp cannot compress the model
+                #       this happens when the descriptor trainable is set False?
+                #raise RuntimeError(msg)
+                #self._print(msg)
+                compressed_model.symlink_to(frozen_model.relative_to(compressed_model.parent))
         else:
             ...
 
@@ -279,7 +331,7 @@ class DeepmdTrainer(AbstractTrainer):
     def read_convergence(self) -> bool:
         """"""
         # - get numb_steps
-        with open(self.directory/f"{self.name}.json") as fopen:
+        with open(self.directory/f"{self.name}.json", "r") as fopen:
             input_json = json.load(fopen)
         numb_steps = input_json["training"]["numb_steps"]
 
@@ -374,7 +426,6 @@ def convert_groups(
     return cum_batchsizes, sys_dirs
 
 
-@registers.manager.register
 class DeepmdManager(AbstractPotentialManager):
 
     name = "deepmd"

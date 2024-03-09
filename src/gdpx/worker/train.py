@@ -14,30 +14,45 @@ import numpy as np
 
 from tinydb import Query, TinyDB
 
-from gdpx.worker.worker import AbstractWorker
-from gdpx.potential.trainer import AbstractTrainer
-from gdpx.utils.command import run_command
+from .worker import AbstractWorker
+from ..potential.trainer import AbstractTrainer
 
 
 class TrainerBasedWorker(AbstractWorker):
 
     TRAIN_PREFIX: str = "m"
 
-    _print: Callable = print
-    _debug: Callable = print
+    #: Whether share a dataset when training a group of models.
+    _share_dataset: bool = False
 
-    def __init__(self, trainer: AbstractTrainer, scheduler, directory=None, *args, **kwargs) -> NoReturn:
-        """"""
+    def __init__(
+            self, trainer: AbstractTrainer, scheduler, share_dataset: bool=False,
+            auto_submit: bool = True, directory=None, *args, **kwargs
+        ) -> None:
+        """Initialise a TrainerBasedWorker.
+
+        Args:
+            share_dataset: Whether a group of models are traiend on a shared dataset.
+            auto_submit: 
+                Whether submit scheduler jobs automatically. Otherwise, it must be
+                submitted manully.
+
+        """
         super().__init__(directory)
 
         self.trainer = trainer
         self.scheduler = scheduler
+
+        self._share_dataset = share_dataset
+        self._submit = auto_submit
 
         return
     
     def run(self, dataset, size: int=1, init_models=None, *args, **kwargs) -> None:
         """"""
         super().run(*args, **kwargs)
+        if init_models is None:
+            init_models = [None for i in range(size)]
         assert len(init_models) == size, "The number of init models is inconsistent with size."
 
         trainer = self.trainer
@@ -49,6 +64,22 @@ class TrainerBasedWorker(AbstractWorker):
         ) as database:
             queued_jobs = database.search(Query().queued.exists())
         queued_names = [q["gdir"][self.UUIDLEN+1:] for q in queued_jobs]
+
+        # - check whether share a dataset?
+        if size >1 and self._share_dataset:
+            dataset_path = self.directory/"shared_dataset"
+            if not dataset_path.exists():
+                self._print("prepare a shared dataset...")
+                if hasattr(trainer, "_prepare_dataset"):
+                    trainer.directory = dataset_path # NOTE: only for creating dataset
+                    dataset = trainer._prepare_dataset(dataset, *args, **kwargs)
+                    self._print(dataset)
+                else:
+                    self._print(f"{trainer.__class__.__name__} does not support a shared dataset.")
+            else:
+                ...
+        else:
+            self._print("trainers prepare their own datasets...")
 
         # - local mode
         for i in range(size):
@@ -68,11 +99,19 @@ class TrainerBasedWorker(AbstractWorker):
                 # - save trainer file
                 trainer_params = {}
                 trainer_params["trainer"] = trainer.as_dict()
+
+                # extra params
+                trainer_params["trainer"]["share_dataset"] = self._share_dataset
+
                 # TODO: we set a random seed for each trainer
                 #       as a committee will be trained
                 trainer_params["trainer"]["random_seed"] = np.random.randint(0, 10000)
 
-                trainer_params["init_model"] = init_models[i]
+                # NOTE: YAML accepts only string path
+                curr_init_model = init_models[i]
+                if curr_init_model is not None:
+                    curr_init_model = str(curr_init_model)
+                trainer_params["init_model"] = curr_init_model
 
                 trainer_params["dataset"] = dataset.as_dict()
                 with open(wdir/"trainer.yaml", "w") as fopen:
@@ -178,7 +217,8 @@ class TrainerBasedWorker(AbstractWorker):
             #print("unretrieved_wdirs: ", unretrieved_wdirs)
             for p in unretrieved_wdirs:
                 self.trainer.directory = p
-                results.append(self.trainer.freeze())
+                # NOTE: Due to yaml.safe_dump, we require path should be str
+                results.append(str(self.trainer.freeze()))
 
         with TinyDB(
             self.directory/f"_{self.scheduler.name}_jobs.json", indent=2
